@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=3 python run.py train experiments/bidaf.json --include-package squad2.dataset_readers --include-package squad2.models -s squad2/output --recover
