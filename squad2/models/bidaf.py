@@ -300,8 +300,8 @@ class BidirectionalAttentionFlow(Model):
             acc_p_start = na_inv.type(torch.cuda.FloatTensor) * span_start_logits.type(torch.cuda.FloatTensor)
             acc_y_start = na_inv.type(torch.cuda.FloatTensor) * span_start.squeeze(-1).type(torch.cuda.FloatTensor)
             
-            print("SHape of AccuracyP",acc_p_start.size(),"Shape of Y start:",acc_y_start.size())
-            self._span_start_accuracy(acc_y_start[0],acc_p_start)
+            print("SHape of AccuracyP",acc_p_start.size(),"Shape of Y start:",acc_y_start[0].size())
+            self._span_start_accuracy(acc_p_start,acc_y_start[0])
 
             
             preds_end = (na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_end_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
@@ -312,9 +312,19 @@ class BidirectionalAttentionFlow(Model):
             
             loss += nll_loss(preds_end,y_end[0])
             
-            self._span_end_accuracy(na_inv.type(torch.cuda.FloatTensor) * span_end_logits.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * span_end.squeeze(-1).type(torch.cuda.FloatTensor)[0])
+            acc_p_end = na_inv.type(torch.cuda.FloatTensor) * span_end_logits.type(torch.cuda.FloatTensor)
+            acc_y_end = na_inv.type(torch.cuda.FloatTensor) * span_end.squeeze(-1).type(torch.cuda.FloatTensor)
+            print("SHape of AccuracyP",acc_p_end.size(),"Shape of Y start:",acc_y_end[0].size())
+
+                
+            self._span_end_accuracy(acc_p_end,acc_y_end[0])
             
-            self._span_accuracy(na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start, span_end], -1))
+            #self._span_accuracy(na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start.type(torch.cuda.FloatTensor), span_end.type(torch.cuda.FloatTensor)], -1))
+            
+            acc_p = na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor)
+            acc_y = na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start[0].type(torch.cuda.FloatTensor), span_end[0].type(torch.cuda.FloatTensor)], -1)
+            print("Acc P:", acc_p.size(),"ACC Y:",acc_y.size(),"P:",acc_p,"Y:",acc_y)
+            self._span_accuracy(acc_p,acc_y)
             
 
             output_dict["loss"] = loss
