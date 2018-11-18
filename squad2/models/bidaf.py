@@ -191,14 +191,21 @@ class BidirectionalAttentionFlow(Model):
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
         # Shape: (batch_size, passage_length, question_length)
-        passage_question_attention = util.masked_softmax(passage_question_similarity, question_mask)
+        print(passage_question_similarity.size())
+        question_mask_temp = question_mask
+        question_mask_temp = question_mask_temp.unsqueeze_(1)
+        #question_mask_temp = question_mask.expand(40,1,22)
+        print(question_mask_temp.size())
+
+        print(question_mask_temp.size())
+        passage_question_attention = util.masked_softmax(passage_question_similarity, question_mask_temp)
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
 
         # We replace masked values with something really negative here, so they don't affect the
         # max below.
         masked_similarity = util.replace_masked_values(passage_question_similarity,
-                                                       question_mask.unsqueeze(1),
+                                                       question_mask,
                                                        -1e7)
         # Shape: (batch_size, passage_length)
         question_passage_similarity = masked_similarity.max(dim=-1)[0].squeeze(-1)
@@ -272,17 +279,44 @@ class BidirectionalAttentionFlow(Model):
         }
 
         # span_start = span_start.type(torch.FloatTensor).cuda(0)
-        print(na_probs.shape, util.masked_log_softmax(span_start_logits, passage_mask).shape, span_start.shape, na_gt.shape)
-        print(na_probs.type(), util.masked_log_softmax(span_start_logits, passage_mask).type(), span_start.type(), na_gt.type())
-
+        #print(na_probs.shape, util.masked_log_softmax(span_start_logits, passage_mask).shape, span_start.shape, na_gt.shape)
+        #print(na_probs.type(), util.masked_log_softmax(span_start_logits, passage_mask).type(), span_start.type(), na_gt.type())
+        print(na_inv.type(), span_start.squeeze(-1).type())
         # Compute the loss for training.
         if span_start is not None:
             print(span_start_logits.shape, span_start.shape)
-            loss = nll_loss(na_inv * util.masked_log_softmax(span_start_logits, passage_mask), na_inv * span_start.squeeze(-1))
-            self._span_start_accuracy(na_inv * span_start_logits, na_inv * span_start.squeeze(-1))
-            loss += nll_loss(na_inv * util.masked_log_softmax(span_end_logits, passage_mask), na_inv * span_end.squeeze(-1))
-            self._span_end_accuracy(na_inv * span_end_logits, na_inv * span_end.squeeze(-1))
-            self._span_accuracy(na_inv * best_span, na_inv * torch.stack([span_start, span_end], -1))
+            preds_start =(na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
+            #preds =((na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor)),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
+            y_start = (na_inv.type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
+            
+            print("PREDS-SHAPE:",preds_start.size(),"Y-SHAPE:",y_start.size(),"PREDS:",preds_start,"Y:",y_start)
+            
+            loss = nll_loss(preds_start,y_start[0])
+            #loss = nll_loss(na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor),
+            #                 (na_inv.type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor))
+            
+            #self._span_start_accuracy(na_inv * span_start_logits, na_inv * span_start.squeeze(-1))
+
+            acc_p_start = na_inv.type(torch.cuda.FloatTensor) * span_start_logits.type(torch.cuda.FloatTensor)
+            acc_y_start = na_inv.type(torch.cuda.FloatTensor) * span_start.squeeze(-1).type(torch.cuda.FloatTensor)
+            
+            print("SHape of AccuracyP",acc_p_start.size(),"Shape of Y start:",acc_y_start.size())
+            self._span_start_accuracy(acc_y_start[0],acc_p_start)
+
+            
+            preds_end = (na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_end_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
+            
+            y_end = (na_inv.type(torch.cuda.ByteTensor) * span_end.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
+            
+            #loss += nll_loss(na_inv * util.masked_log_softmax(span_end_logits, passage_mask), na_inv * span_end.squeeze(-1))
+            
+            loss += nll_loss(preds_end,y_end[0])
+            
+            self._span_end_accuracy(na_inv.type(torch.cuda.FloatTensor) * span_end_logits.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * span_end.squeeze(-1).type(torch.cuda.FloatTensor)[0])
+            
+            self._span_accuracy(na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start, span_end], -1))
+            
+
             output_dict["loss"] = loss
 
         # Compute the EM and F1 on SQuAD and add the tokenized input to the output.
