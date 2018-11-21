@@ -13,6 +13,7 @@ from allennlp.modules.matrix_attention.legacy_matrix_attention import LegacyMatr
 from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy, SquadEmAndF1
 from torch.nn.functional import log_softmax
+from torch.nn import Softmax, CrossEntropyLoss
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -103,6 +104,7 @@ class BidirectionalAttentionFlow(Model):
         check_dimensions_match(span_end_encoder.get_input_dim(), 4 * encoding_dim + 3 * modeling_dim,
                                "span end encoder input dim", "4 * encoding dim + 3 * modeling dim")
 
+        self._na_accuracy = CategoricalAccuracy()
         self._span_start_accuracy = CategoricalAccuracy()
         self._span_end_accuracy = CategoricalAccuracy()
         self._span_accuracy = BooleanAccuracy()
@@ -195,9 +197,9 @@ class BidirectionalAttentionFlow(Model):
         question_mask_temp = question_mask
         question_mask_temp = question_mask_temp.unsqueeze_(1)
         #question_mask_temp = question_mask.expand(40,1,22)
-        print(question_mask_temp.size())
+        # print(question_mask_temp.size())
 
-        print(question_mask_temp.size())
+        # print(question_mask_temp.size())
         passage_question_attention = util.masked_softmax(passage_question_similarity, question_mask_temp)
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
@@ -260,12 +262,13 @@ class BidirectionalAttentionFlow(Model):
         best_span = self.get_best_span(span_start_logits, span_end_logits)
 
         span_start_logits_do = self._dropout(span_start_logits)
-        na_logits = self._na_dense(passage_length)(span_start_logits_do)
-        na_probs = log_softmax(na_logits)
+        na_logits_start = self._na_dense(passage_length)(span_start_logits_do)
+        span_end_logits_do = self._dropout(span_end_logits)
+        na_logits_end = self._na_dense(passage_length)(span_end_logits_do)
+        na_logits = Softmax(dim=1)(na_logits_start) * Softmax(dim=1)(na_logits_end)
+        na_probs = Softmax(dim=1)(na_logits)
         na_gt = (span_start == -1)
         na_inv = (1.0 - na_gt)
-
-        print(type(na_gt), na_gt.type(), type(na_inv), na_inv.type())
 
         output_dict = {
                 "passage_question_attention": passage_question_attention,
@@ -278,54 +281,40 @@ class BidirectionalAttentionFlow(Model):
                 "na_probs": na_probs
         }
 
-        # span_start = span_start.type(torch.FloatTensor).cuda(0)
-        #print(na_probs.shape, util.masked_log_softmax(span_start_logits, passage_mask).shape, span_start.shape, na_gt.shape)
-        #print(na_probs.type(), util.masked_log_softmax(span_start_logits, passage_mask).type(), span_start.type(), na_gt.type())
-        print(na_inv.type(), span_start.squeeze(-1).type())
         # Compute the loss for training.
         if span_start is not None:
-            print(span_start_logits.shape, span_start.shape)
+            loss = 0.0
+
+            # calculate loss for answer existance
+            loss += CrossEntropyLoss()(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.LongTensor))
+            self._na_accuracy(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.FloatTensor))
+
+            # calculate loss if there is answer
+            # loss for start
             preds_start =(na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
-            #preds =((na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor)),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
-            y_start = (na_inv.type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
+            y_start = (na_inv.squeeze(-1).type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
+            loss += nll_loss(preds_start, y_start)
             
-            print("PREDS-SHAPE:",preds_start.size(),"Y-SHAPE:",y_start.size(),"PREDS:",preds_start,"Y:",y_start)
-            
-            loss = nll_loss(preds_start,y_start[0])
-            #loss = nll_loss(na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor),
-            #                 (na_inv.type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor))
-            
-            #self._span_start_accuracy(na_inv * span_start_logits, na_inv * span_start.squeeze(-1))
-
+            # accuracy for start
             acc_p_start = na_inv.type(torch.cuda.FloatTensor) * span_start_logits.type(torch.cuda.FloatTensor)
-            acc_y_start = na_inv.type(torch.cuda.FloatTensor) * span_start.squeeze(-1).type(torch.cuda.FloatTensor)
-            
-            print("SHape of AccuracyP",acc_p_start.size(),"Shape of Y start:",acc_y_start[0].size())
-            self._span_start_accuracy(acc_p_start,acc_y_start[0])
+            acc_y_start = na_inv.squeeze(-1).type(torch.cuda.FloatTensor) * span_start.squeeze(-1).type(torch.cuda.FloatTensor)
+            self._span_start_accuracy(acc_p_start, acc_y_start)
 
             
+            # loss for end
             preds_end = (na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_end_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
+            y_end = (na_inv.squeeze(-1).type(torch.cuda.ByteTensor) * span_end.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)            
+            loss += nll_loss(preds_end, y_end)
             
-            y_end = (na_inv.type(torch.cuda.ByteTensor) * span_end.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
-            
-            #loss += nll_loss(na_inv * util.masked_log_softmax(span_end_logits, passage_mask), na_inv * span_end.squeeze(-1))
-            
-            loss += nll_loss(preds_end,y_end[0])
-            
+            # accuracy for end
             acc_p_end = na_inv.type(torch.cuda.FloatTensor) * span_end_logits.type(torch.cuda.FloatTensor)
-            acc_y_end = na_inv.type(torch.cuda.FloatTensor) * span_end.squeeze(-1).type(torch.cuda.FloatTensor)
-            print("SHape of AccuracyP",acc_p_end.size(),"Shape of Y start:",acc_y_end[0].size())
+            acc_y_end = na_inv.squeeze(-1).type(torch.cuda.FloatTensor) * span_end.squeeze(-1).type(torch.cuda.FloatTensor)                
+            self._span_end_accuracy(acc_p_end, acc_y_end)
 
-                
-            self._span_end_accuracy(acc_p_end,acc_y_end[0])
-            
-            #self._span_accuracy(na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor), na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start.type(torch.cuda.FloatTensor), span_end.type(torch.cuda.FloatTensor)], -1))
-            
+            # accuracy for span
             acc_p = na_inv.type(torch.cuda.FloatTensor) * best_span.type(torch.cuda.FloatTensor)
-            acc_y = na_inv.type(torch.cuda.FloatTensor) * torch.stack([span_start[0].type(torch.cuda.FloatTensor), span_end[0].type(torch.cuda.FloatTensor)], -1)
-            print("Acc P:", acc_p.size(),"ACC Y:",acc_y.size(),"P:",acc_p,"Y:",acc_y)
+            acc_y = na_inv.type(torch.cuda.FloatTensor) * torch.cat([span_start.type(torch.cuda.FloatTensor), span_end.type(torch.cuda.FloatTensor)], -1)
             self._span_accuracy(acc_p,acc_y)
-            
 
             output_dict["loss"] = loss
 
@@ -354,6 +343,7 @@ class BidirectionalAttentionFlow(Model):
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         exact_match, f1_score = self._squad_metrics.get_metric(reset)
         return {
+                'na_acc': self._na_accuracy.get_metric(reset),
                 'start_acc': self._span_start_accuracy.get_metric(reset),
                 'end_acc': self._span_end_accuracy.get_metric(reset),
                 'span_acc': self._span_accuracy.get_metric(reset),

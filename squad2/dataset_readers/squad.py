@@ -80,7 +80,7 @@ class SquadReader(DatasetReader):
                                                                 for k, v in instance.fields.items()}]
 
                     if not all([all_instance_fields_and_types[0] == x for x in all_instance_fields_and_types]):
-                        print(all_instance_fields_and_types)
+                        # print(all_instance_fields_and_types)
                         raise ConfigurationError("You cannot construct a Batch with non-homogeneous Instances.")
 
                     yield instance
