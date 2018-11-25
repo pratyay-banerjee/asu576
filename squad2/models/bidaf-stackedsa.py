@@ -14,11 +14,12 @@ from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy, SquadEmAndF1
 from torch.nn.functional import log_softmax
 from torch.nn import Softmax, CrossEntropyLoss
+from allennlp.modules.seq2seq_encoders import StackedSelfAttentionEncoder, MultiHeadSelfAttention
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
-@Model.register("bidaf4squad1")
+@Model.register("bidafselfattent")
 class BidirectionalAttentionFlow(Model):
     """
     This class implements Minjoon Seo's `Bidirectional Attention Flow model
@@ -45,6 +46,8 @@ class BidirectionalAttentionFlow(Model):
     similarity_function : ``SimilarityFunction``
         The similarity function that we will use when comparing encoded passage and question
         representations.
+    self_attention_layer : ``StackedSelfAttentionEncoder``
+        SelfAttention Text Encoder
     modeling_layer : ``Seq2SeqEncoder``
         The encoder (with its own internal stacking) that we will use in between the bidirectional
         attention and predicting span start and end.
@@ -70,6 +73,7 @@ class BidirectionalAttentionFlow(Model):
                  num_highway_layers: int,
                  phrase_layer: Seq2SeqEncoder,
                  similarity_function: SimilarityFunction,
+                 self_attention_layer : StackedSelfAttentionEncoder,
                  modeling_layer: Seq2SeqEncoder,
                  span_end_encoder: Seq2SeqEncoder,
                  dropout: float = 0.2,
@@ -85,23 +89,34 @@ class BidirectionalAttentionFlow(Model):
         self._matrix_attention = LegacyMatrixAttention(similarity_function)
         self._modeling_layer = modeling_layer
         self._span_end_encoder = span_end_encoder
+        
+        #New Self Attention layer
+        self._self_attention_layer = self_attention_layer
+        self._sa_matrix_attention = LegacyMatrixAttention(similarity_function)
+        selfattent_dim = self_attention_layer.get_output_dim() # its 200
+        #print("Self Attention Output Dim:",selfattent_dim,"\n")
 
         encoding_dim = phrase_layer.get_output_dim()
         modeling_dim = modeling_layer.get_output_dim()
-        span_start_input_dim = encoding_dim * 4 + modeling_dim
+        #span_start_input_dim = encoding_dim * 4 + modeling_dim
+        
+        span_start_input_dim = encoding_dim * 4 + modeling_dim + 2*selfattent_dim
+        
         self._span_start_predictor = TimeDistributed(torch.nn.Linear(span_start_input_dim, 1))
 
         span_end_encoding_dim = span_end_encoder.get_output_dim()
-        span_end_input_dim = encoding_dim * 4 + span_end_encoding_dim
+        #span_end_input_dim = encoding_dim * 4 + span_end_encoding_dim
+        span_end_input_dim = encoding_dim * 4 + span_end_encoding_dim + 2*selfattent_dim
+
         self._span_end_predictor = TimeDistributed(torch.nn.Linear(span_end_input_dim, 1))
 
         # Bidaf has lots of layer dimensions which need to match up - these aren't necessarily
         # obvious from the configuration files, so we check here.
-        check_dimensions_match(modeling_layer.get_input_dim(), 4 * encoding_dim,
+        check_dimensions_match(modeling_layer.get_input_dim(), 4 * encoding_dim + 2*selfattent_dim,
                                "modeling layer input dim", "4 * encoding dim")
         check_dimensions_match(text_field_embedder.get_output_dim(), phrase_layer.get_input_dim(),
                                "text field embedder output dim", "phrase layer input dim")
-        check_dimensions_match(span_end_encoder.get_input_dim(), 4 * encoding_dim + 3 * modeling_dim,
+        check_dimensions_match(span_end_encoder.get_input_dim(), 4 * encoding_dim + 3 * modeling_dim +2*selfattent_dim,
                                "span end encoder input dim", "4 * encoding dim + 3 * modeling dim")
 
         self._na_accuracy = CategoricalAccuracy()
@@ -190,23 +205,27 @@ class BidirectionalAttentionFlow(Model):
         encoded_passage = self._dropout(self._phrase_layer(embedded_passage, passage_lstm_mask))
         encoding_dim = encoded_question.size(-1)
 
+        #New Question SA encoding
+        sa_encoded_question = self._self_attention_layer(embedded_question, question_lstm_mask)
+        sa_encoded_passage = self._self_attention_layer(embedded_passage, passage_lstm_mask)
+
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
-        
-        # Check for passage/question string similarity
-        
+        sa_passage_question_similarity = self._sa_matrix_attention(sa_encoded_passage, sa_encoded_question)
         
         # Shape: (batch_size, passage_length, question_length)
         #print(passage_question_similarity.size())
         question_mask_temp = question_mask
         question_mask_temp = question_mask_temp.unsqueeze_(1)
-        #question_mask_temp = question_mask.expand(40,1,22)
         # print(question_mask_temp.size())
 
         # print(question_mask_temp.size())
         passage_question_attention = util.masked_softmax(passage_question_similarity, question_mask_temp)
+        sa_passage_question_attention = util.masked_softmax(sa_passage_question_similarity, question_mask_temp)
+        
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
+        sa_passage_question_vectors = util.weighted_sum(sa_encoded_question, sa_passage_question_attention)
 
         # We replace masked values with something really negative here, so they don't affect the
         # max below.
@@ -223,9 +242,14 @@ class BidirectionalAttentionFlow(Model):
         tiled_question_passage_vector = question_passage_vector.unsqueeze(1).expand(batch_size,
                                                                                     passage_length,
                                                                                     encoding_dim)
-
-        # Shape: (batch_size, passage_length, encoding_dim * 4)
+        
+        #print("Shape of SA Encoded:",sa_encoded_question.size(),sa_encoded_passage.size())
+        #print("Required Shape of Encoded Passage:",encoded_passage.size(),passage_question_vectors.size())
+        
+        # Shape: (batch_size, passage_length, encoding_dim * 4 + 2*sa_dim )
         final_merged_passage = torch.cat([encoded_passage,
+                                          sa_encoded_passage,
+                                          sa_passage_question_vectors,
                                           passage_question_vectors,
                                           encoded_passage * passage_question_vectors,
                                           encoded_passage * tiled_question_passage_vector],
@@ -234,7 +258,7 @@ class BidirectionalAttentionFlow(Model):
         modeled_passage = self._dropout(self._modeling_layer(final_merged_passage, passage_lstm_mask))
         modeling_dim = modeled_passage.size(-1)
 
-        # Shape: (batch_size, passage_length, encoding_dim * 4 + modeling_dim))
+        # Shape: (batch_size, passage_length, encoding_dim * 4 + modeling_dim + 2*selfattention_dim))
         span_start_input = self._dropout(torch.cat([final_merged_passage, modeled_passage], dim=-1))
         # Shape: (batch_size, passage_length)
         span_start_logits = self._span_start_predictor(span_start_input).squeeze(-1)
