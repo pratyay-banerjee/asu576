@@ -3,17 +3,19 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch.nn.functional import nll_loss
+from torch.nn import ReLU
 
 from allennlp.common.checks import check_dimensions_match
 from allennlp.data import Vocabulary
 from allennlp.models.model import Model
-from allennlp.modules import Highway
+from allennlp.modules import Highway, FeedForward
 from allennlp.modules import Seq2SeqEncoder, SimilarityFunction, TimeDistributed, TextFieldEmbedder
 from allennlp.modules.matrix_attention.legacy_matrix_attention import LegacyMatrixAttention
 from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy, SquadEmAndF1
 from torch.nn.functional import log_softmax
 from torch.nn import Softmax, CrossEntropyLoss
+from allennlp.nn import Activation
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -110,7 +112,8 @@ class BidirectionalAttentionFlow(Model):
         self._span_accuracy = BooleanAccuracy()
         self._squad_metrics = SquadEmAndF1()
 
-        self._na_dense = lambda in_dim : torch.nn.Linear(in_dim, 2).cuda()
+        self._na_dense1 = lambda in_dim : FeedForward(in_dim, 2, [in_dim//2, 2], [ReLU(), lambda x: x], [0.1, 0.1]).cuda()
+        self._na_dense2 = lambda in_dim : FeedForward(in_dim, 2, [in_dim//2, 2], [ReLU(), lambda x: x], [0.1, 0.1]).cuda()
 
         if dropout > 0:
             self._dropout = torch.nn.Dropout(p=dropout)
@@ -261,18 +264,21 @@ class BidirectionalAttentionFlow(Model):
         span_end_input = self._dropout(torch.cat([final_merged_passage, encoded_span_end], dim=-1))
         span_end_logits = self._span_end_predictor(span_end_input).squeeze(-1)
         span_end_probs = util.masked_softmax(span_end_logits, passage_mask)
-        span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, -1e7)
-        span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, -1e7)
-        best_span = self.get_best_span(span_start_logits, span_end_logits)
 
         span_start_logits_do = self._dropout(span_start_logits)
-        na_logits_start = self._na_dense(passage_length)(span_start_logits_do)
+        na_logits_start = self._na_dense1(passage_length)(span_start_logits)
+        na_logits_start = Softmax(dim=1)(na_logits_start)
         span_end_logits_do = self._dropout(span_end_logits)
-        na_logits_end = self._na_dense(passage_length)(span_end_logits_do)
-        na_logits = Softmax(dim=1)(na_logits_start) * Softmax(dim=1)(na_logits_end)
+        na_logits_end = self._na_dense2(passage_length)(span_end_logits)
+        na_logits_end = Softmax(dim=1)(na_logits_end)
+        na_logits = na_logits_start * na_logits_end
         na_probs = Softmax(dim=1)(na_logits)
         na_gt = (span_start == -1)
         na_inv = (1.0 - na_gt)
+        
+        span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, -1e7)
+        span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, -1e7)
+        best_span = self.get_best_span(span_start_logits, span_end_logits)
 
         output_dict = {
                 "passage_question_attention": passage_question_attention,
@@ -290,8 +296,8 @@ class BidirectionalAttentionFlow(Model):
             loss = 0.0
 
             # calculate loss for answer existance
-            loss += CrossEntropyLoss()(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.LongTensor))
-            self._na_accuracy(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.FloatTensor))
+            loss += nll_loss(na_logits.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.LongTensor))
+            self._na_accuracy(na_logits.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.FloatTensor))
 
             # calculate loss if there is answer
             # loss for start
