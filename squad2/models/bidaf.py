@@ -13,7 +13,7 @@ from allennlp.modules import Seq2SeqEncoder, SimilarityFunction, TimeDistributed
 from allennlp.modules.matrix_attention.legacy_matrix_attention import LegacyMatrixAttention
 from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy, SquadEmAndF1
-from torch.nn.functional import log_softmax
+from torch.nn.functional import log_softmax, pad
 from torch.nn import Softmax, CrossEntropyLoss
 from allennlp.nn import Activation
 
@@ -112,8 +112,8 @@ class BidirectionalAttentionFlow(Model):
         self._span_accuracy = BooleanAccuracy()
         self._squad_metrics = SquadEmAndF1()
 
-        self._span_start_predictor_w_na = lambda in_dim : torch.nn.Linear(in_dim, in_dim+1).cuda()
-        self._span_end_predictor_w_na = lambda in_dim : torch.nn.Linear(in_dim, in_dim+1).cuda()
+        self._span_start_predictor_w_na = torch.nn.Linear(1000, 1000)
+        self._span_end_predictor_w_na = torch.nn.Linear(1000, 1000)
 
         if dropout > 0:
             self._dropout = torch.nn.Dropout(p=dropout)
@@ -241,8 +241,14 @@ class BidirectionalAttentionFlow(Model):
         span_start_input = self._dropout(torch.cat([final_merged_passage, modeled_passage], dim=-1))
         # Shape: (batch_size, passage_length)
         span_start_logits = self._span_start_predictor(span_start_input).squeeze(-1)
-        # Shape: (batch_size, passage_length+1)
-        span_start_logits_w_na = self._span_start_predictor_w_na(passage_length)(span_start_logits).squeeze(-1)
+        
+        # Shape: (batch_size, 1000)
+        span_start_logits_pad = (0, 0, 0, 1000 - passage_length)
+        span_start_logits_w_na = self._span_start_predictor_w_na( pad(span_start_logits, span_start_logits_pad) ).squeeze(-1)
+        # print("test", span_start_logits_w_na.size())
+
+        # Shape: (batch_size, passage_lenght+1)
+        span_start_logits_w_na = span_start_logits_w_na[:, :passage_length+1]
 
         span_start_na_logits = span_start_logits_w_na[:, 0]
         span_start_logits = span_start_logits_w_na[:, 1:]
@@ -271,7 +277,11 @@ class BidirectionalAttentionFlow(Model):
         span_end_logits = self._span_end_predictor(span_end_input).squeeze(-1)
         
         # Shape: (batch_size, passage_length+1)
-        span_end_logits_w_na = self._span_end_predictor_w_na(passage_length)(span_end_logits).squeeze(-1)
+        span_end_logits_pad = (0, 0, 0, 1000 - passage_length)
+        span_end_logits_w_na = self._span_end_predictor_w_na( pad(span_end_logits, span_end_logits_pad) ).squeeze(-1)
+
+        # Shape: (batch_size, passage_lenght+1)
+        span_end_logits_w_na = span_end_logits_w_na[:, :passage_length+1]
 
         span_end_na_logits = span_end_logits_w_na[:, 0]
         span_end_logits = span_end_logits_w_na[:, 1:]

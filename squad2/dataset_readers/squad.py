@@ -60,6 +60,7 @@ class SquadReader(DatasetReader):
 
                 for question_answer in paragraph_json['qas']:
                     question_text = question_answer["question"].strip().replace("\n", "")
+                    print(question_text)
                     answer_texts = [answer['text'] for answer in question_answer['answers']]
                     if not question_answer['is_impossible']:
                         span_starts = [answer['answer_start'] for answer in question_answer['answers']]

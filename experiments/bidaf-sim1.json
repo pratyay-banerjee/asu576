@@ -1,7 +1,7 @@
 {
   "dataset_reader": {
     "type": "squad1",
-    "lazy" : false,
+    "lazy" : true,
     "token_indexers": {
       "tokens": {
         "type": "single_id",
@@ -18,8 +18,8 @@
     }
   },
   "vocabulary": {
-      "directory_path": "squad2/experiments/first_run/vocabulary",
-      "extend" : false
+     "directory_path": "squad2/na_fixed_v6/vocabulary",
+     "extend" : false
   } ,
   "train_data_path": "squad2/data/train-v2.0.json",
   "validation_data_path": "squad2/data/dev-v2.0.json",
@@ -85,7 +85,7 @@
   "iterator": {
     "type": "bucket",
     "sorting_keys": [["passage", "num_tokens"], ["question", "num_tokens"]],
-    "batch_size": 70
+    "batch_size": 64
   },
 
   "trainer": {
