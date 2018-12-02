@@ -128,7 +128,8 @@ class BidirectionalAttentionFlow(Model):
         self._span_accuracy = BooleanAccuracy()
         self._squad_metrics = SquadEmAndF1()
 
-        self._na_dense = lambda in_dim : torch.nn.Linear(in_dim, 2).cuda()
+        self._span_start_predictor_w_na = torch.nn.Linear(1000, 1000)
+        self._span_end_predictor_w_na = torch.nn.Linear(1000, 1000)
 
         if dropout > 0:
             self._dropout = torch.nn.Dropout(p=dropout)
@@ -291,6 +292,17 @@ class BidirectionalAttentionFlow(Model):
         span_start_input = self._dropout(torch.cat([final_merged_passage, modeled_passage], dim=-1))
         # Shape: (batch_size, passage_length)
         span_start_logits = self._span_start_predictor(span_start_input).squeeze(-1)
+
+        # Shape: (batch_size, 1000)
+        span_start_logits_pad = (0, 1000 - passage_length, 0, 0)
+        span_start_logits_w_na = self._span_start_predictor_w_na( pad(span_start_logits, span_start_logits_pad) ).squeeze(-1)
+
+        # Shape: (batch_size, passage_lenght+1)
+        span_start_logits_w_na = span_start_logits_w_na[:, :passage_length+1]
+
+        span_start_na_logits = span_start_logits_w_na[:, 0]
+        span_start_logits = span_start_logits_w_na[:, 1:]
+
         # Shape: (batch_size, passage_length)
         span_start_probs = util.masked_softmax(span_start_logits, passage_mask)
 
@@ -313,18 +325,24 @@ class BidirectionalAttentionFlow(Model):
         # Shape: (batch_size, passage_length, encoding_dim * 4 + span_end_encoding_dim +4*sadim)
         span_end_input = self._dropout(torch.cat([final_merged_passage, encoded_span_end], dim=-1))
         span_end_logits = self._span_end_predictor(span_end_input).squeeze(-1)
+
+        # Shape: (batch_size, passage_length+1)
+        span_end_logits_pad = (0, 1000 - passage_length, 0, 0)
+        span_end_logits_w_na = self._span_end_predictor_w_na( pad(span_end_logits, span_end_logits_pad) ).squeeze(-1)
+
+        # Shape: (batch_size, passage_lenght+1)
+        span_end_logits_w_na = span_end_logits_w_na[:, :passage_length+1]
+
+        span_end_na_logits = span_end_logits_w_na[:, 0]
+        span_end_logits = span_end_logits_w_na[:, 1:]
+
         span_end_probs = util.masked_softmax(span_end_logits, passage_mask)
+        
         span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, -1e7)
         span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, -1e7)
         best_span = self.get_best_span(span_start_logits, span_end_logits)
 
-        span_start_logits_do = self._dropout(span_start_logits)
-        na_logits_start = self._na_dense(passage_length)(span_start_logits_do)
-        span_end_logits_do = self._dropout(span_end_logits)
-        na_logits_end = self._na_dense(passage_length)(span_end_logits_do)
-        na_logits = Softmax(dim=1)(na_logits_start) * Softmax(dim=1)(na_logits_end)
-        na_probs = Softmax(dim=1)(na_logits)
-        na_gt = (span_start == -1)
+        na_gt = (span_start == -1).type(torch.cuda.LongTensor)
         na_inv = (1.0 - na_gt)
 
         output_dict = {
@@ -334,22 +352,21 @@ class BidirectionalAttentionFlow(Model):
                 "span_end_logits": span_end_logits,
                 "span_end_probs": span_end_probs,
                 "best_span": best_span,
-                "na_logits": na_logits,
-                "na_probs": na_probs
+                # "na_logits": na_logits,
+                # "na_probs": na_probs
         }
 
         # Compute the loss for training.
         if span_start is not None:
+            y_start = span_start + 1
+            y_end = span_end + 1
+            passage_mask_w_na = torch.cat([torch.ones([batch_size, 1]).type(torch.cuda.FloatTensor), passage_mask], -1)
             loss = 0.0
-
-            # calculate loss for answer existance
-            loss += CrossEntropyLoss()(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.LongTensor))
-            self._na_accuracy(na_probs.type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.FloatTensor))
 
             # calculate loss if there is answer
             # loss for start
-            preds_start =(na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_start_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
-            y_start = (na_inv.squeeze(-1).type(torch.cuda.ByteTensor) * span_start.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)
+            preds_start = util.masked_log_softmax(span_start_logits_w_na.type(torch.cuda.FloatTensor),passage_mask_w_na.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor)
+            y_start = y_start.squeeze(-1).type(torch.cuda.LongTensor)
             loss += nll_loss(preds_start, y_start)
             
             # accuracy for start
@@ -359,8 +376,8 @@ class BidirectionalAttentionFlow(Model):
 
             
             # loss for end
-            preds_end = (na_inv.type(torch.cuda.FloatTensor) * util.masked_log_softmax(span_end_logits.type(torch.cuda.FloatTensor),passage_mask.type(torch.cuda.FloatTensor))).type(torch.cuda.FloatTensor)
-            y_end = (na_inv.squeeze(-1).type(torch.cuda.ByteTensor) * span_end.squeeze(-1).type(torch.cuda.ByteTensor)).type(torch.cuda.LongTensor)            
+            preds_end = util.masked_log_softmax(span_end_logits_w_na.type(torch.cuda.FloatTensor),passage_mask_w_na.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor)
+            y_end = y_end.squeeze(-1).type(torch.cuda.LongTensor)            
             loss += nll_loss(preds_end, y_end)
             
             # accuracy for end
@@ -374,6 +391,15 @@ class BidirectionalAttentionFlow(Model):
             self._span_accuracy(acc_p,acc_y)
 
             output_dict["loss"] = loss
+
+            preds_start = util.masked_softmax(span_start_logits_w_na.type(torch.cuda.FloatTensor),passage_mask_w_na.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor)
+            preds_end = util.masked_softmax(span_end_logits_w_na.type(torch.cuda.FloatTensor),passage_mask_w_na.type(torch.cuda.FloatTensor)).type(torch.cuda.FloatTensor)
+            
+            output_dict["na_logits"] = preds_start[:, 0] * preds_end[:, 0]
+            output_dict["na_probs"] = torch.stack([1.0 - output_dict["na_logits"], output_dict["na_logits"]], -1)
+
+            # calculate loss for answer existance
+            self._na_accuracy(output_dict["na_probs"].type(torch.cuda.FloatTensor), na_gt.squeeze(-1).type(torch.cuda.FloatTensor))
 
         # Compute the EM and F1 on SQuAD and add the tokenized input to the output.
         if metadata is not None:
