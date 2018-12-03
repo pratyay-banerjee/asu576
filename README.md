@@ -1,6 +1,6 @@
 # Extending and Improving AllenNLP BiDAF for Squad 1 to Squad 2 with No Answer
 
-## 0 -Framework Inspiration
+## 0 Framework Inspiration
 For more details check out [this article](https://medium.com/swlh/deep-learning-for-text-made-easy-with-allennlp-62bc79d41f31) 
 
 ## 1 SQuAD 2
