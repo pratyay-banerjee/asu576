@@ -10,7 +10,7 @@ This contains passages and questions which might have answers present in the pro
 The file download.sh contains the commands to fetch the dataset. We modify the provided DataSetReader of AllenNlp to be able to read the SQuAD2 dataset.
 
 ## 3 The model
-We implement several models, starting from the baseline model of the AllenNLP's BiDAF modified for No-Answer. The other models are iterative improvements like changing Similarity Function of the Attention Layer, Adding different types of Attention like Self Attention, Cross Attention, MultiHeaded Attention and Attention over Attention.
+We implement several models, starting from the baseline model of the AllenNLP's BiDAF modified for No-Answer. The other models are iterative improvements like changing Similarity Function of the Attention Layer, Adding different types of Attention.
 
 ## 4 Training the model
 The trainer uses the Adam optimizer for varied number of epochs. The configs are present in the experiments directory, with file names reflecting a very description of the experiments. The file commands.txt provides how to run the training. Patience and other configurables are present in the json experiment files.
