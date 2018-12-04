@@ -12,7 +12,7 @@ from allennlp.modules import Seq2SeqEncoder, SimilarityFunction, TimeDistributed
 from allennlp.modules.matrix_attention.legacy_matrix_attention import LegacyMatrixAttention
 from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy, SquadEmAndF1
-from torch.nn.functional import log_softmax
+from torch.nn.functional import log_softmax, pad
 from torch.nn import Softmax, CrossEntropyLoss
 from allennlp.modules.seq2seq_encoders import StackedSelfAttentionEncoder, MultiHeadSelfAttention
 #from allennlp.modules.matrix_attention import LinearMatrixAttention
