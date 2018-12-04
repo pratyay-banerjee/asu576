@@ -19,6 +19,7 @@ from allennlp.modules.seq2seq_encoders import StackedSelfAttentionEncoder, Multi
 from squad2.models.custom_attention import LinearMatrixAttention1
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
+from torch.nn.functional import log_softmax, pad     
 
 @Model.register("bidafsimplesa")
 class BidirectionalAttentionFlow(Model):
